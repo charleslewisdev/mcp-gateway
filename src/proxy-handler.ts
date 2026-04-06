@@ -21,13 +21,22 @@ export const proxyHandler = {
       });
     }
 
+    // Handle CORS preflight for MCP headers
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders(),
+      });
+    }
+
     // Extract backend name from path: /api/{backend}/...
     // The apiRoute is "/api/" so url.pathname starts with /api/
     const pathAfterApi = url.pathname.replace(/^\/api\//, "");
     const slashIndex = pathAfterApi.indexOf("/");
     const backendName =
       slashIndex === -1 ? pathAfterApi : pathAfterApi.slice(0, slashIndex);
-    const remainingPath = slashIndex === -1 ? "" : pathAfterApi.slice(slashIndex);
+    const remainingPath =
+      slashIndex === -1 ? "" : pathAfterApi.slice(slashIndex);
 
     const backend = backends[backendName];
     if (!backend) {
@@ -38,8 +47,8 @@ export const proxyHandler = {
     }
 
     // Build the target URL.
-    // backend.url is the full base (e.g. "https://bramble.example.com/mcp")
-    // remainingPath is whatever comes after /api/{backend} (e.g. "" or "/sse")
+    // backend.url is the full base (e.g. "https://bramble.example.com")
+    // remainingPath is whatever comes after /api/{backend} (e.g. "/mcp")
     const base = backend.url.replace(/\/$/, "");
     const targetUrl = new URL(base + remainingPath);
     targetUrl.search = url.search;
@@ -59,7 +68,18 @@ export const proxyHandler = {
     });
 
     try {
-      return await fetch(proxyRequest);
+      const response = await fetch(proxyRequest);
+
+      // Add CORS and expose MCP headers so clients can read mcp-session-id
+      const proxyResponse = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+      for (const [key, value] of Object.entries(corsHeaders())) {
+        proxyResponse.headers.set(key, value);
+      }
+      return proxyResponse;
     } catch (err) {
       return new Response(
         `Failed to reach backend "${backendName}": ${err instanceof Error ? err.message : String(err)}`,
@@ -68,3 +88,13 @@ export const proxyHandler = {
     }
   },
 };
+
+function corsHeaders(): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, mcp-session-id, Accept",
+    "Access-Control-Expose-Headers": "mcp-session-id",
+  };
+}

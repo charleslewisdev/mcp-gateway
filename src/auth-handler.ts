@@ -27,20 +27,23 @@ async function handleAuthorizeGet(
   request: Request,
   env: Env
 ): Promise<Response> {
-  // Parse the OAuth request to get client info for the consent screen
-  const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
-  const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
+  try {
+    const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
 
-  // Serialize the original query string so we can replay it after login
-  const oauthParams = new URL(request.url).search;
+    // Serialize the original query string so we can replay it after login
+    const oauthParams = new URL(request.url).search;
 
-  return new Response(
-    renderLoginPage({
-      clientName: client?.clientName ?? undefined,
-      oauthParams,
-    }),
-    { headers: { "Content-Type": "text/html;charset=UTF-8" } }
-  );
+    return new Response(
+      renderLoginPage({
+        clientName: client?.clientName ?? undefined,
+        oauthParams,
+      }),
+      { headers: { "Content-Type": "text/html;charset=UTF-8" } }
+    );
+  } catch (err) {
+    return new Response(`Authorization error: ${err instanceof Error ? err.message : String(err)}`, { status: 400 });
+  }
 }
 
 async function handleAuthorizePost(
@@ -64,22 +67,34 @@ async function handleAuthorizePost(
     return loginError("Invalid username or password", oauthParams);
   }
 
-  // Replay the original OAuth authorize request to parse it
-  const authorizeUrl = new URL(request.url);
-  authorizeUrl.search = oauthParams;
-  const syntheticRequest = new Request(authorizeUrl.toString());
-  const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(syntheticRequest);
+  // Replay the original OAuth authorize request to parse it.
+  // oauthParams is the original query string (e.g. "?client_id=...&redirect_uri=...").
+  // We build a synthetic GET request with those params so the library can parse them.
+  try {
+    const authorizeUrl = new URL(request.url);
+    authorizeUrl.search = oauthParams;
+    const syntheticRequest = new Request(authorizeUrl.toString(), {
+      method: "GET",
+    });
+    const oauthReq =
+      await env.OAUTH_PROVIDER.parseAuthRequest(syntheticRequest);
 
-  // Complete the authorization — issue the grant
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-    request: oauthReq,
-    userId: username,
-    metadata: { label: "mcp-gateway" },
-    scope: oauthReq.scope,
-    props: { username },
-  });
+    // Complete the authorization — issue the grant
+    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+      request: oauthReq,
+      userId: username,
+      metadata: { label: "mcp-gateway" },
+      scope: oauthReq.scope,
+      props: { username },
+    });
 
-  return Response.redirect(redirectTo, 302);
+    return Response.redirect(redirectTo, 302);
+  } catch (err) {
+    return loginError(
+      `Authorization failed: ${err instanceof Error ? err.message : String(err)}`,
+      oauthParams
+    );
+  }
 }
 
 function loginError(message: string, oauthParams: string): Response {

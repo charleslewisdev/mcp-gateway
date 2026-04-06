@@ -4,14 +4,17 @@
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Create a KV namespace: wrangler kv namespace create OAUTH_KV
-  // Then paste the id here
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
       "id": "YOUR_KV_NAMESPACE_ID"
     }
   ]
+
+  // Custom domain (deployment-specific) — uncomment and set your own:
+  // "routes": [
+  //   { "pattern": "mcp.example.com/*", "zone_name": "example.com" }
+  // ]
 
   // Environment variables (set via `wrangler secret put`):
   //   USERNAME        - login username
