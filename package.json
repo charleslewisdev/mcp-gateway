@@ -1,0 +1,27 @@
+{
+  "name": "mcp-gateway",
+  "version": "0.1.0",
+  "description": "OAuth 2.1 proxy for self-hosted MCP servers — deploy on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.4.0",
+    "bcryptjs": "^2.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250327.0",
+    "@types/bcryptjs": "^2.4.6",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  },
+  "license": "MIT",
+  "author": "charleslewisdev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/charleslewisdev/mcp-gateway.git"
+  }
+}
