@@ -1,105 +1,185 @@
+import type {
+  AuthRequest,
+  OAuthHelpers,
+} from "@cloudflare/workers-oauth-provider";
 import { compare } from "bcryptjs";
-import { renderLoginPage } from "./login-page.js";
-import type { Env } from "./types.js";
+import { backendNameFromPath } from "./backends.js";
+import { credentialId } from "./credentials.js";
+import { LOGIN_PAGE_HEADERS, renderLoginPage } from "./login-page.js";
+import type { Env, GrantProps } from "./types.js";
 
 /**
  * Handles the /authorize endpoint — renders login form (GET) and
  * verifies credentials (POST), then completes the OAuth flow.
  */
-export const authHandler = {
-  async fetch(request: Request, env: Env) {
-    const url = new URL(request.url);
+export async function handleAuthorize(
+  request: Request,
+  env: Env,
+  oauth: OAuthHelpers
+): Promise<Response> {
+  if (request.method === "GET") {
+    return handleAuthorizeGet(request, env, oauth);
+  }
+  if (request.method === "POST") {
+    return handleAuthorizePost(request, env, oauth);
+  }
+  return new Response("Not found", { status: 404 });
+}
 
-    if (url.pathname === "/authorize") {
-      if (request.method === "GET") {
-        return handleAuthorizeGet(request, env);
-      }
-      if (request.method === "POST") {
-        return handleAuthorizePost(request, env);
-      }
-    }
+interface VerifiedAuthRequest {
+  oauthReq: AuthRequest;
+  page: { clientName?: string; redirectHost: string; backend: string; oauthParams: string };
+}
 
-    return new Response("Not found", { status: 404 });
-  },
-};
+/**
+ * Parses an authorize request and applies the gateway's policy. Registration is
+ * open, so the client's name proves nothing: these checks decide where a code
+ * can go.
+ */
+async function verifyAuthRequest(
+  request: Request,
+  env: Env,
+  oauth: OAuthHelpers,
+  oauthParams: string
+): Promise<VerifiedAuthRequest> {
+  const authorizeUrl = new URL(request.url);
+  authorizeUrl.search = oauthParams;
+  const oauthReq = await oauth.parseAuthRequest(
+    new Request(authorizeUrl.toString())
+  );
+
+  if (!oauthReq.codeChallenge || oauthReq.codeChallengeMethod !== "S256") {
+    throw new Error("PKCE with S256 is required");
+  }
+
+  const redirect = new URL(oauthReq.redirectUri);
+  if (!allowedRedirectHosts(env).includes(redirect.hostname)) {
+    throw new Error(
+      `Redirect host not allowed: ${redirect.hostname}. Add it to ALLOWED_REDIRECT_HOSTS to let this client connect.`
+    );
+  }
+
+  // parseAuthRequest has checked the resource, so this names a real backend
+  const backend = backendNameFromPath(new URL(oauthReq.resource!).pathname);
+  const client = await oauth.lookupClient(oauthReq.clientId);
+  return {
+    oauthReq,
+    page: {
+      clientName: client?.clientName,
+      redirectHost: redirect.host,
+      backend: backend!,
+      oauthParams,
+    },
+  };
+}
+
+function allowedRedirectHosts(env: Env): string[] {
+  return (env.ALLOWED_REDIRECT_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
 
 async function handleAuthorizeGet(
   request: Request,
-  env: Env
+  env: Env,
+  oauth: OAuthHelpers
 ): Promise<Response> {
   try {
-    const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
-    const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
-
-    // Serialize the original query string so we can replay it after login
-    const oauthParams = new URL(request.url).search;
-
-    return new Response(
-      renderLoginPage({
-        clientName: client?.clientName ?? undefined,
-        oauthParams,
-      }),
-      { headers: { "Content-Type": "text/html;charset=UTF-8" } }
+    const { page } = await verifyAuthRequest(
+      request,
+      env,
+      oauth,
+      new URL(request.url).search
     );
+    return loginPage(page);
   } catch (err) {
-    return new Response(`Authorization error: ${err instanceof Error ? err.message : String(err)}`, { status: 400 });
+    return authorizationError(err);
   }
 }
 
 async function handleAuthorizePost(
   request: Request,
-  env: Env
+  env: Env,
+  oauth: OAuthHelpers
 ): Promise<Response> {
   const formData = await request.formData();
-  const username = formData.get("username") as string | null;
-  const password = formData.get("password") as string | null;
-  const oauthParams = formData.get("oauthParams") as string | null;
+  const username = formData.get("username");
+  const password = formData.get("password");
+  const oauthParams = (formData.get("oauthParams") as string | null) ?? "";
 
-  if (!username || !password || !oauthParams) {
-    return loginError("Missing credentials", oauthParams ?? "");
-  }
-
-  // Verify credentials
-  if (
-    username !== env.USERNAME ||
-    !(await compare(password, env.PASSWORD_HASH))
-  ) {
-    return loginError("Invalid username or password", oauthParams);
-  }
-
-  // Replay the original OAuth authorize request to parse it.
-  // oauthParams is the original query string (e.g. "?client_id=...&redirect_uri=...").
-  // We build a synthetic GET request with those params so the library can parse them.
+  let verified: VerifiedAuthRequest;
   try {
-    const authorizeUrl = new URL(request.url);
-    authorizeUrl.search = oauthParams;
-    const syntheticRequest = new Request(authorizeUrl.toString(), {
-      method: "GET",
-    });
-    const oauthReq =
-      await env.OAUTH_PROVIDER.parseAuthRequest(syntheticRequest);
+    verified = await verifyAuthRequest(request, env, oauth, oauthParams);
+  } catch (err) {
+    return authorizationError(err);
+  }
+  const { oauthReq, page } = verified;
 
+  if (
+    typeof username !== "string" ||
+    typeof password !== "string" ||
+    !username ||
+    !password
+  ) {
+    return loginPage(page, "Missing credentials", 401);
+  }
+
+  if (!(await underLoginLimit(request, env))) {
+    return loginPage(page, "Too many attempts. Try again in a minute.", 429, {
+      "Retry-After": "60",
+    });
+  }
+
+  // Run bcrypt for every username so timing doesn't reveal which one is valid
+  const passwordMatches = await compare(password, env.PASSWORD_HASH);
+  if (!passwordMatches || username !== env.USERNAME) {
+    return loginPage(page, "Invalid username or password", 401);
+  }
+
+  try {
     // Complete the authorization — issue the grant
-    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+    const props: GrantProps = {
+      username,
+      credentialId: await credentialId(env),
+    };
+    const { redirectTo } = await oauth.completeAuthorization({
       request: oauthReq,
       userId: username,
       metadata: { label: "mcp-gateway" },
       scope: oauthReq.scope,
-      props: { username },
+      props,
     });
 
     return Response.redirect(redirectTo, 302);
   } catch (err) {
-    return loginError(
-      `Authorization failed: ${err instanceof Error ? err.message : String(err)}`,
-      oauthParams
-    );
+    return authorizationError(err);
   }
 }
 
-function loginError(message: string, oauthParams: string): Response {
-  return new Response(renderLoginPage({ error: message, oauthParams }), {
-    status: 401,
-    headers: { "Content-Type": "text/html;charset=UTF-8" },
+async function underLoginLimit(request: Request, env: Env): Promise<boolean> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  // In this order, so attempts one address already can't make don't use up the
+  // shared allowance
+  const perIp = await env.LOGIN_IP_LIMITER.limit({ key: ip });
+  if (!perIp.success) return false;
+  const global = await env.LOGIN_GLOBAL_LIMITER.limit({ key: "login" });
+  return global.success;
+}
+
+function loginPage(
+  page: VerifiedAuthRequest["page"],
+  error?: string,
+  status = 200,
+  headers: Record<string, string> = {}
+): Response {
+  return new Response(renderLoginPage({ ...page, error }), {
+    status,
+    headers: { ...LOGIN_PAGE_HEADERS, ...headers },
   });
+}
+
+function authorizationError(err: unknown): Response {
+  const message = err instanceof Error ? err.message : String(err);
+  return new Response(`Authorization error: ${message}`, { status: 400 });
 }

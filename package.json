@@ -6,17 +6,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "hash-password": "node scripts/hash-password.mjs"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.4.0",
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
     "bcryptjs": "^2.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250327.0",
+    "@cloudflare/workers-types": "^5.20261031.1",
     "@types/bcryptjs": "^2.4.6",
     "typescript": "^5.7.0",
-    "wrangler": "^4.0.0"
+    "vitest": "^5.0.5",
+    "wrangler": "^4.156.0"
   },
   "license": "MIT",
   "author": "charleslewisdev",

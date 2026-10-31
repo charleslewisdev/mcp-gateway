@@ -1,9 +1,21 @@
+// No form-action here: Chrome applies it to the redirect back to the client too.
+export const LOGIN_PAGE_HEADERS = {
+  "Content-Type": "text/html;charset=UTF-8",
+  "Cache-Control": "no-store",
+  "Content-Security-Policy":
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+};
+
 export function renderLoginPage(opts: {
   error?: string;
   clientName?: string;
+  redirectHost: string;
+  backend: string;
   oauthParams: string;
 }): string {
-  const { error, clientName, oauthParams } = opts;
+  const { error, clientName, redirectHost, backend, oauthParams } = opts;
   const displayName = clientName || "An application";
 
   return `<!DOCTYPE html>
@@ -53,8 +65,17 @@ export function renderLoginPage(opts: {
       text-align: center;
       font-size: 0.875rem;
       color: #94a3b8;
+      margin-bottom: 0.5rem;
+    }
+
+    .redirect-host {
+      text-align: center;
+      font-size: 0.8125rem;
+      color: #94a3b8;
       margin-bottom: 2rem;
     }
+
+    .redirect-host strong { color: #e2e8f0; }
 
     .client-name {
       color: #38bdf8;
@@ -134,7 +155,8 @@ export function renderLoginPage(opts: {
   <div class="card">
     <div class="logo">&#x1f512;</div>
     <h1>MCP Gateway</h1>
-    <p class="subtitle"><span class="client-name">${escapeHtml(displayName)}</span> wants to connect</p>
+    <p class="subtitle"><span class="client-name">${escapeHtml(displayName)}</span> wants to connect to ${escapeHtml(backend)}</p>
+    <p class="redirect-host">Access goes to <strong>${escapeHtml(redirectHost)}</strong>. The name above is self-reported, so check this host.</p>
 
     ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
 
