@@ -11,7 +11,7 @@
     "hash-password": "node scripts/hash-password.mjs"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.4.0",
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
     "bcryptjs": "^2.4.3"
   },
   "devDependencies": {

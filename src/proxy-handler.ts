@@ -1,4 +1,5 @@
-import { findBackend, parseBackendPath } from "./backends.js";
+import type { OAuthResourceHandler } from "@cloudflare/workers-oauth-provider";
+import { backendPathAfterName } from "./backends.js";
 import { credentialId } from "./credentials.js";
 import type { BackendConfig, Env, GrantProps } from "./types.js";
 
@@ -14,81 +15,70 @@ const FORWARDED_HEADERS = [
 ];
 
 /**
- * API handler — proxies authenticated MCP requests to the configured backend.
+ * API handler — proxies authenticated MCP requests to one backend.
  *
- * Route pattern: /:backend/*
- * The first path segment after the apiRoute prefix identifies the backend.
- * Everything after it is forwarded to the backend URL.
+ * Route pattern: /api/:backend/*
+ * Everything after the backend name is forwarded to the backend URL.
  */
-export const proxyHandler = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const props = ctx.props as GrantProps;
-    if (props.credentialId !== (await credentialId(env))) {
-      return new Response("Credentials have changed", {
-        status: 401,
-        headers: { "WWW-Authenticate": 'Bearer error="invalid_token"' },
+export function createProxyHandler(
+  backendName: string,
+  backend: BackendConfig
+): OAuthResourceHandler<Env, GrantProps> {
+  return {
+    async fetch(request, env, ctx) {
+      if (ctx.props.credentialId !== (await credentialId(env))) {
+        return new Response("Credentials have changed", {
+          status: 401,
+          headers: { "WWW-Authenticate": 'Bearer error="invalid_token"' },
+        });
+      }
+
+      const url = new URL(request.url);
+
+      // Build the target URL.
+      // backend.url is the full base (e.g. "https://bramble.example.com")
+      // remainingPath is whatever comes after /api/{backend} (e.g. "/mcp")
+      const base = backend.url.replace(/\/$/, "");
+      const targetUrl = new URL(base + backendPathAfterName(url.pathname));
+      targetUrl.search = url.search;
+
+      const headers = new Headers();
+      for (const name of FORWARDED_HEADERS) {
+        const value = request.headers.get(name);
+        if (value !== null) headers.set(name, value);
+      }
+      // The OAuth Bearer token stops here; the backend gets its own API key
+      headers.set("Authorization", `Bearer ${backend.token}`);
+
+      const proxyRequest = new Request(targetUrl.toString(), {
+        method: request.method,
+        headers,
+        body: request.body,
+        // @ts-expect-error — duplex needed for streaming request bodies in Workers
+        duplex: "half",
       });
-    }
 
-    const url = new URL(request.url);
-    const path = parseBackendPath(url.pathname);
+      try {
+        const response = await fetch(proxyRequest);
 
-    let backend: BackendConfig | null;
-    try {
-      backend = path && findBackend(env, path.name);
-    } catch {
-      return new Response("Server misconfiguration: invalid BACKENDS", {
-        status: 500,
-      });
-    }
-
-    if (!path || !backend) {
-      return new Response("Unknown backend", { status: 404 });
-    }
-
-    // Build the target URL.
-    // backend.url is the full base (e.g. "https://bramble.example.com")
-    // remainingPath is whatever comes after /api/{backend} (e.g. "/mcp")
-    const base = backend.url.replace(/\/$/, "");
-    const targetUrl = new URL(base + path.remainingPath);
-    targetUrl.search = url.search;
-
-    const headers = new Headers();
-    for (const name of FORWARDED_HEADERS) {
-      const value = request.headers.get(name);
-      if (value !== null) headers.set(name, value);
-    }
-    // The OAuth Bearer token stops here; the backend gets its own API key
-    headers.set("Authorization", `Bearer ${backend.token}`);
-
-    const proxyRequest = new Request(targetUrl.toString(), {
-      method: request.method,
-      headers,
-      body: request.body,
-      // @ts-expect-error — duplex needed for streaming request bodies in Workers
-      duplex: "half",
-    });
-
-    try {
-      const response = await fetch(proxyRequest);
-
-      // The OAuth library adds the rest of the CORS headers; this one lets
-      // browser clients read mcp-session-id
-      const proxyResponse = new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-      proxyResponse.headers.set(
-        "Access-Control-Expose-Headers",
-        "mcp-session-id"
-      );
-      return proxyResponse;
-    } catch (err) {
-      console.error(`Failed to reach backend "${path.name}":`, err);
-      return new Response(`Failed to reach backend "${path.name}"`, {
-        status: 502,
-      });
-    }
-  },
-};
+        // The OAuth library adds the rest of the CORS headers; this one lets
+        // browser clients read mcp-session-id
+        const proxyResponse = new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+        proxyResponse.headers.set(
+          "Access-Control-Expose-Headers",
+          "mcp-session-id"
+        );
+        return proxyResponse;
+      } catch (err) {
+        console.error(`Failed to reach backend "${backendName}":`, err);
+        return new Response(`Failed to reach backend "${backendName}"`, {
+          status: 502,
+        });
+      }
+    },
+  };
+}

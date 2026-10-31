@@ -2,7 +2,7 @@ import { hashSync } from "bcryptjs";
 import type { Env } from "../src/types.js";
 
 export const ORIGIN = "https://gateway.test";
-export const RESOURCE = `${ORIGIN}/api/bramble/mcp`;
+export const RESOURCE = `${ORIGIN}/api/bramble`;
 export const REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback";
 export const USERNAME = "owner";
 export const PASSWORD = "correct horse";

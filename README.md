@@ -95,7 +95,7 @@ The `BACKENDS` secret is a JSON object mapping path prefixes to backend configs:
 
 Each backend is accessible at `/api/{name}/...` — the Worker strips the prefix, appends the rest of the path to the configured URL, and forwards the request with the Bearer token. `https://your-worker.your-domain.com/api/bramble/mcp` above reaches `https://bramble.example.com/mcp`.
 
-A grant covers the one backend the client connected to, so add a connector for each backend. Clients must send the RFC 8707 `resource` parameter, as MCP requires.
+Each backend is its own OAuth resource, `https://your-worker.your-domain.com/api/{name}`, and a token works only for that resource. Add a connector for each backend. With several backends, clients must send the RFC 8707 `resource` parameter, as MCP requires. Backend names are visible without signing in, through the OAuth metadata, so don't put anything sensitive in them.
 
 Backends receive `Accept`, `Content-Type`, `Last-Event-ID`, `Mcp-Protocol-Version`, `Mcp-Session-Id` and `User-Agent`. Other client headers, including `Cookie`, are dropped.
 
@@ -114,7 +114,7 @@ Backends receive `Accept`, `Content-Type`, `Last-Event-ID`, `Mcp-Protocol-Versio
 
 ### Revoking access
 
-Changing `USERNAME` or `PASSWORD_HASH` invalidates every existing grant, so each client has to sign in again.
+Changing `USERNAME` or `PASSWORD_HASH` invalidates every existing grant, access and refresh tokens included, so each client has to sign in again.
 
 ### Free tier
 
@@ -125,7 +125,7 @@ The Workers free tier allows 10ms of CPU per request. A bcrypt check at cost 10 
 | Endpoint | Purpose |
 |---|---|
 | `/.well-known/oauth-authorization-server` | OAuth metadata discovery |
-| `/.well-known/oauth-protected-resource` | Resource metadata |
+| `/.well-known/oauth-protected-resource/api/{backend}` | Resource metadata |
 | `/oauth/register` | Dynamic Client Registration |
 | `/oauth/token` | Token exchange and refresh |
 | `/authorize` | Login page |

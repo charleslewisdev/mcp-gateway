@@ -1,6 +1,9 @@
-import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
+import type {
+  AuthRequest,
+  OAuthHelpers,
+} from "@cloudflare/workers-oauth-provider";
 import { compare } from "bcryptjs";
-import { findBackend, parseBackendPath } from "./backends.js";
+import { backendNameFromPath } from "./backends.js";
 import { credentialId } from "./credentials.js";
 import { LOGIN_PAGE_HEADERS, renderLoginPage } from "./login-page.js";
 import type { Env, GrantProps } from "./types.js";
@@ -9,22 +12,19 @@ import type { Env, GrantProps } from "./types.js";
  * Handles the /authorize endpoint — renders login form (GET) and
  * verifies credentials (POST), then completes the OAuth flow.
  */
-export const authHandler = {
-  async fetch(request: Request, env: Env) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/authorize") {
-      if (request.method === "GET") {
-        return handleAuthorizeGet(request, env);
-      }
-      if (request.method === "POST") {
-        return handleAuthorizePost(request, env);
-      }
-    }
-
-    return new Response("Not found", { status: 404 });
-  },
-};
+export async function handleAuthorize(
+  request: Request,
+  env: Env,
+  oauth: OAuthHelpers
+): Promise<Response> {
+  if (request.method === "GET") {
+    return handleAuthorizeGet(request, env, oauth);
+  }
+  if (request.method === "POST") {
+    return handleAuthorizePost(request, env, oauth);
+  }
+  return new Response("Not found", { status: 404 });
+}
 
 interface VerifiedAuthRequest {
   oauthReq: AuthRequest;
@@ -39,11 +39,12 @@ interface VerifiedAuthRequest {
 async function verifyAuthRequest(
   request: Request,
   env: Env,
+  oauth: OAuthHelpers,
   oauthParams: string
 ): Promise<VerifiedAuthRequest> {
   const authorizeUrl = new URL(request.url);
   authorizeUrl.search = oauthParams;
-  const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(
+  const oauthReq = await oauth.parseAuthRequest(
     new Request(authorizeUrl.toString())
   );
 
@@ -56,13 +57,15 @@ async function verifyAuthRequest(
     throw new Error(`Redirect host not allowed: ${redirectHost}`);
   }
 
-  const client = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
+  // parseAuthRequest has checked the resource, so this names a real backend
+  const backend = backendNameFromPath(new URL(oauthReq.resource!).pathname);
+  const client = await oauth.lookupClient(oauthReq.clientId);
   return {
     oauthReq,
     page: {
       clientName: client?.clientName,
       redirectHost,
-      backend: requestedBackend(oauthReq, authorizeUrl.origin, env),
+      backend: backend!,
       oauthParams,
     },
   };
@@ -75,36 +78,16 @@ function allowedRedirectHosts(env: Env): string[] {
     .filter(Boolean);
 }
 
-/**
- * The library binds a token to the resource named here, so requiring one is
- * what keeps a grant to a single backend.
- */
-function requestedBackend(
-  oauthReq: AuthRequest,
-  origin: string,
-  env: Env
-): string {
-  const resource =
-    typeof oauthReq.resource === "string" ? new URL(oauthReq.resource) : null;
-  const backend = resource && parseBackendPath(resource.pathname);
-  if (
-    resource?.origin !== origin ||
-    !backend ||
-    !findBackend(env, backend.name)
-  ) {
-    throw new Error("The resource parameter must name a configured backend");
-  }
-  return backend.name;
-}
-
 async function handleAuthorizeGet(
   request: Request,
-  env: Env
+  env: Env,
+  oauth: OAuthHelpers
 ): Promise<Response> {
   try {
     const { page } = await verifyAuthRequest(
       request,
       env,
+      oauth,
       new URL(request.url).search
     );
     return loginPage(page);
@@ -115,7 +98,8 @@ async function handleAuthorizeGet(
 
 async function handleAuthorizePost(
   request: Request,
-  env: Env
+  env: Env,
+  oauth: OAuthHelpers
 ): Promise<Response> {
   const formData = await request.formData();
   const username = formData.get("username") as string | null;
@@ -124,7 +108,7 @@ async function handleAuthorizePost(
 
   let verified: VerifiedAuthRequest;
   try {
-    verified = await verifyAuthRequest(request, env, oauthParams);
+    verified = await verifyAuthRequest(request, env, oauth, oauthParams);
   } catch (err) {
     return authorizationError(err);
   }
@@ -152,7 +136,7 @@ async function handleAuthorizePost(
       username,
       credentialId: await credentialId(env),
     };
-    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+    const { redirectTo } = await oauth.completeAuthorization({
       request: oauthReq,
       userId: username,
       metadata: { label: "mcp-gateway" },

@@ -84,7 +84,7 @@ function login(
 async function connect(
   env: Env,
   resource = RESOURCE
-): Promise<{ access_token: string; refresh_token: string }> {
+): Promise<{ access_token: string; refresh_token: string; clientId: string }> {
   const clientId = await register(env);
   const redirect = await login(env, authorizeQuery(clientId, { resource }));
   expect(redirect.status).toBe(302);
@@ -103,10 +103,22 @@ async function connect(
     }),
   });
   expect(response.status).toBe(200);
-  return (await response.json()) as {
+  const tokens = (await response.json()) as {
     access_token: string;
     refresh_token: string;
   };
+  return { ...tokens, clientId };
+}
+
+function refresh(env: Env, clientId: string, refreshToken: string) {
+  return call("/oauth/token", env, {
+    method: "POST",
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+    }),
+  });
 }
 
 function bearer(token: string, headers: Record<string, string> = {}) {
@@ -126,6 +138,32 @@ afterEach(() => {
 });
 
 describe("authorization flow", () => {
+  it("leads a client from a 401 to the backend's resource and the issuer", async () => {
+    const env = testEnv();
+
+    const challenge = await call("/api/bramble/mcp", env);
+    const header = challenge.headers.get("WWW-Authenticate")!;
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(header)![1];
+    const metadata = await call(new URL(metadataUrl).pathname, env);
+    const body = (await metadata.json()) as {
+      resource: string;
+      authorization_servers: string[];
+    };
+    const server = await call("/.well-known/oauth-authorization-server", env);
+    const serverBody = (await server.json()) as {
+      issuer: string;
+      registration_endpoint: string;
+      code_challenge_methods_supported: string[];
+    };
+
+    expect(challenge.status).toBe(401);
+    expect(body.resource).toBe(RESOURCE);
+    expect(body.authorization_servers).toEqual([ORIGIN]);
+    expect(serverBody.issuer).toBe(ORIGIN);
+    expect(serverBody.registration_endpoint).toBe(`${ORIGIN}/oauth/register`);
+    expect(serverBody.code_challenge_methods_supported).toEqual(["S256"]);
+  });
+
   it("connects a client and proxies with the backend's key", async () => {
     const env = testEnv();
     const { access_token } = await connect(env);
@@ -212,9 +250,9 @@ describe("authorization flow", () => {
   it.each([
     ["no resource", null],
     ["the bare origin", ORIGIN],
-    ["an unknown backend", `${ORIGIN}/api/nope/mcp`],
-    ["an inherited property name", `${ORIGIN}/api/constructor/mcp`],
-    ["another origin", "https://other.test/api/bramble/mcp"],
+    ["an unknown backend", `${ORIGIN}/api/nope`],
+    ["an inherited property name", `${ORIGIN}/api/constructor`],
+    ["another origin", "https://other.test/api/bramble"],
   ])("refuses %s as the resource", async (_name, resource) => {
     const env = testEnv();
     const clientId = await register(env);
@@ -289,18 +327,21 @@ describe("login", () => {
 });
 
 describe("proxy", () => {
-  it("answers 404 for a removed backend without listing the others", async () => {
+  it("answers 404 for an unknown backend or an inherited property name", async () => {
     const env = testEnv();
-    const { access_token } = await connect(env);
 
-    const response = await call(
-      "/api/bramble/mcp",
-      { ...env, BACKENDS: '{"homeassistant":{"url":"https://ha.test","token":"t"}}' },
-      bearer(access_token)
-    );
+    const unknown = await call("/api/nope/mcp", env);
+    const inherited = await call("/api/constructor/mcp", env);
 
-    expect(response.status).toBe(404);
-    expect(await response.text()).toBe("Unknown backend");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toBe("Unknown backend");
+    expect(inherited.status).toBe(404);
+  });
+
+  it("answers 500 when BACKENDS is invalid", async () => {
+    const response = await call("/api/bramble/mcp", testEnv({ BACKENDS: "{" }));
+
+    expect(response.status).toBe(500);
   });
 
   it("keeps a token to the backend it was granted for", async () => {
@@ -390,13 +431,15 @@ describe("proxy", () => {
 
   it("stops serving existing tokens once the password changes", async () => {
     const env = testEnv();
-    const { access_token } = await connect(env);
+    const { access_token, refresh_token, clientId } = await connect(env);
 
     env.PASSWORD_HASH = hashSync("a new password", 4);
     const api = await call("/api/bramble/mcp", env, bearer(access_token));
+    const renewed = await refresh(env, clientId, refresh_token);
 
     expect(api.status).toBe(401);
     expect(api.headers.get("WWW-Authenticate")).toContain("invalid_token");
     expect(backendFetch).not.toHaveBeenCalled();
+    expect(renewed.status).toBe(400);
   });
 });
