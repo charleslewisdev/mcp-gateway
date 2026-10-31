@@ -12,11 +12,11 @@ Claude.ai  ──OAuth 2.1──▶  mcp-gateway (Cloudflare Worker)  ──Bear
 
 ## Features
 
-- Full OAuth 2.1: Authorization Code + PKCE, Dynamic Client Registration, token refresh
-- Simple password auth (bcrypt) — no external IdP required
-- Multi-backend routing — one deployment proxies to multiple MCP servers
+- Full OAuth 2.1: Authorization Code + PKCE (S256 required), Dynamic Client Registration, token refresh
+- Simple password auth (bcrypt) with rate-limited login — no external IdP required
+- Multi-backend routing — one deployment proxies to multiple MCP servers, and each grant reaches one backend
+- Redirect host allowlist, so a self-registered client can't collect an authorization code
 - Streamable HTTP transport passthrough
-- Cloudflare Workers free tier compatible
 
 ## Quick Start
 
@@ -47,16 +47,14 @@ Copy the output `id` into `wrangler.jsonc`.
 ```bash
 # Your login credentials
 wrangler secret put USERNAME
-wrangler secret put PASSWORD_HASH
 
-# Generate a bcrypt hash for your password:
-# npx bcryptjs-cli hash "your-password"
-# Or: node -e "import('bcryptjs').then(b=>b.hash('your-password',10).then(console.log))"
+# Prompts for your password without echoing it, then stores its bcrypt hash
+npm run --silent hash-password | wrangler secret put PASSWORD_HASH
 
 # Backend configuration (JSON)
 wrangler secret put BACKENDS
 # Example value:
-# {"bramble":{"url":"https://bramble.example.com/mcp","token":"your-api-key"}}
+# {"bramble":{"url":"https://bramble.example.com","token":"your-api-key"}}
 ```
 
 ### 4. Deploy
@@ -85,17 +83,21 @@ The `BACKENDS` secret is a JSON object mapping path prefixes to backend configs:
 ```json
 {
   "bramble": {
-    "url": "https://bramble.example.com/mcp",
+    "url": "https://bramble.example.com",
     "token": "brk_your_api_key"
   },
   "homeassistant": {
-    "url": "https://ha.example.com/mcp",
+    "url": "https://ha.example.com",
     "token": "ha_your_api_key"
   }
 }
 ```
 
-Each backend is accessible at `/api/{name}/...` — the Worker strips the prefix and forwards to the configured URL with the Bearer token.
+Each backend is accessible at `/api/{name}/...` — the Worker strips the prefix, appends the rest of the path to the configured URL, and forwards the request with the Bearer token. `https://your-worker.your-domain.com/api/bramble/mcp` above reaches `https://bramble.example.com/mcp`.
+
+A grant covers the one backend the client connected to, so add a connector for each backend. Clients must send the RFC 8707 `resource` parameter, as MCP requires.
+
+Backends receive `Accept`, `Content-Type`, `Last-Event-ID`, `Mcp-Protocol-Version`, `Mcp-Session-Id` and `User-Agent`. Other client headers, including `Cookie`, are dropped.
 
 ### Environment variables
 
@@ -104,6 +106,19 @@ Each backend is accessible at `/api/{name}/...` — the Worker strips the prefix
 | `USERNAME` | Login username |
 | `PASSWORD_HASH` | bcrypt hash of the login password |
 | `BACKENDS` | JSON object mapping backend names to `{url, token}` |
+| `ALLOWED_REDIRECT_HOSTS` | Comma-separated hosts allowed to receive authorization codes. Set in `wrangler.jsonc`; defaults to Claude and loopback. Unset refuses every client. |
+
+### Login rate limits
+
+`wrangler.jsonc` allows 5 password attempts a minute per address and 30 a minute overall, through Cloudflare's rate limiting bindings. Counters are per Cloudflare location, so treat the limits as approximate and use a strong password.
+
+### Revoking access
+
+Changing `USERNAME` or `PASSWORD_HASH` invalidates every existing grant, so each client has to sign in again.
+
+### Free tier
+
+The Workers free tier allows 10ms of CPU per request. A bcrypt check at cost 10 took about 90ms of CPU in Node, so the login request may exceed that limit. This hasn't been measured on a deployed Worker. The paid plan's higher limit avoids the question.
 
 ### OAuth endpoints (auto-configured)
 

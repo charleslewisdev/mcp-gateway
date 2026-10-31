@@ -12,4 +12,5 @@ export default new OAuthProvider<Env>({
   clientRegistrationEndpoint: "/oauth/register",
   accessTokenTTL: 3600,
   refreshTokenTTL: 2592000, // 30 days
+  allowPlainPKCE: false,
 });
