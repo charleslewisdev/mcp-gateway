@@ -9,35 +9,56 @@ import { credentialId } from "./credentials.js";
 import { createProxyHandler } from "./proxy-handler.js";
 import type { BackendConfig, Env, GrantProps } from "./types.js";
 
+function resourceFor(origin: string, backendName: string): string {
+  return `${origin}/api/${backendName}`;
+}
+
+function createAuthorizationServer(
+  origin: string,
+  backends: Record<string, BackendConfig>,
+  env: Env
+): OAuthAuthorizationServer<Env> {
+  return new OAuthAuthorizationServer<Env>({
+    issuer: origin,
+    // Each backend is its own OAuth resource, so a token works for one backend
+    resources: Object.keys(backends).map((name) => resourceFor(origin, name)),
+    clientRegistrationEndpoint: "/oauth/register",
+    accessTokenTTL: 3600,
+    refreshTokenTTL: 2592000, // 30 days
+    clientRegistrationCallback: async ({ request }) => {
+      const key = request.headers.get("CF-Connecting-IP") ?? "unknown";
+      const { success } = await env.REGISTER_LIMITER.limit({ key });
+      if (!success) {
+        return {
+          code: "too_many_requests",
+          description: "Too many registrations",
+          status: 429,
+        };
+      }
+    },
+    tokenExchangeCallback: async ({ props }) => {
+      if ((props as GrantProps).credentialId !== (await credentialId(env))) {
+        throw new OAuthError("invalid_grant", {
+          description: "Credentials have changed",
+        });
+      }
+    },
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     let backends: Record<string, BackendConfig>;
+    let authorizationServer: OAuthAuthorizationServer<Env>;
     try {
       backends = parseBackends(env);
-    } catch {
-      return new Response("Server misconfiguration: invalid BACKENDS", {
-        status: 500,
-      });
+      authorizationServer = createAuthorizationServer(url.origin, backends, env);
+    } catch (err) {
+      console.error("Invalid configuration:", err);
+      return new Response("Server misconfiguration", { status: 500 });
     }
-
-    // Each backend is its own OAuth resource, so a token works for one backend
-    const resourceFor = (name: string) => `${url.origin}/api/${name}`;
-    const authorizationServer = new OAuthAuthorizationServer<Env>({
-      issuer: url.origin,
-      resources: Object.keys(backends).map(resourceFor),
-      clientRegistrationEndpoint: "/oauth/register",
-      accessTokenTTL: 3600,
-      refreshTokenTTL: 2592000, // 30 days
-      tokenExchangeCallback: async ({ props, env }) => {
-        if ((props as GrantProps).credentialId !== (await credentialId(env))) {
-          throw new OAuthError("invalid_grant", {
-            description: "Credentials have changed",
-          });
-        }
-      },
-    });
 
     if (url.pathname === "/authorize") {
       const oauth = authorizationServer.getOAuthApi(env);
@@ -54,7 +75,7 @@ export default {
 
     const resource = new OAuthResourceServer<Env, GrantProps>({
       resourceMetadata: {
-        resource: resourceFor(backendName),
+        resource: resourceFor(url.origin, backendName),
         authorization_servers: [url.origin],
       },
       validateToken: (env) => (resource, token) =>

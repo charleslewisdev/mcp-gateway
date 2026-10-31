@@ -33,8 +33,8 @@ interface VerifiedAuthRequest {
 
 /**
  * Parses an authorize request and applies the gateway's policy. Registration is
- * open, so the client's name proves nothing: the checks here are what stop a
- * self-registered client from collecting a code.
+ * open, so the client's name proves nothing: these checks decide where a code
+ * can go.
  */
 async function verifyAuthRequest(
   request: Request,
@@ -52,9 +52,11 @@ async function verifyAuthRequest(
     throw new Error("PKCE with S256 is required");
   }
 
-  const redirectHost = new URL(oauthReq.redirectUri).hostname;
-  if (!allowedRedirectHosts(env).includes(redirectHost)) {
-    throw new Error(`Redirect host not allowed: ${redirectHost}`);
+  const redirect = new URL(oauthReq.redirectUri);
+  if (!allowedRedirectHosts(env).includes(redirect.hostname)) {
+    throw new Error(
+      `Redirect host not allowed: ${redirect.hostname}. Add it to ALLOWED_REDIRECT_HOSTS to let this client connect.`
+    );
   }
 
   // parseAuthRequest has checked the resource, so this names a real backend
@@ -64,7 +66,7 @@ async function verifyAuthRequest(
     oauthReq,
     page: {
       clientName: client?.clientName,
-      redirectHost,
+      redirectHost: redirect.host,
       backend: backend!,
       oauthParams,
     },
@@ -102,8 +104,8 @@ async function handleAuthorizePost(
   oauth: OAuthHelpers
 ): Promise<Response> {
   const formData = await request.formData();
-  const username = formData.get("username") as string | null;
-  const password = formData.get("password") as string | null;
+  const username = formData.get("username");
+  const password = formData.get("password");
   const oauthParams = (formData.get("oauthParams") as string | null) ?? "";
 
   let verified: VerifiedAuthRequest;
@@ -114,7 +116,12 @@ async function handleAuthorizePost(
   }
   const { oauthReq, page } = verified;
 
-  if (!username || !password) {
+  if (
+    typeof username !== "string" ||
+    typeof password !== "string" ||
+    !username ||
+    !password
+  ) {
     return loginPage(page, "Missing credentials", 401);
   }
 
@@ -152,11 +159,12 @@ async function handleAuthorizePost(
 
 async function underLoginLimit(request: Request, env: Env): Promise<boolean> {
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  const [perIp, global] = await Promise.all([
-    env.LOGIN_IP_LIMITER.limit({ key: ip }),
-    env.LOGIN_GLOBAL_LIMITER.limit({ key: "login" }),
-  ]);
-  return perIp.success && global.success;
+  // In this order, so attempts one address already can't make don't use up the
+  // shared allowance
+  const perIp = await env.LOGIN_IP_LIMITER.limit({ key: ip });
+  if (!perIp.success) return false;
+  const global = await env.LOGIN_GLOBAL_LIMITER.limit({ key: "login" });
+  return global.success;
 }
 
 function loginPage(

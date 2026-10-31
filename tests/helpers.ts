@@ -57,6 +57,7 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     ALLOWED_REDIRECT_HOSTS: "claude.ai, claude.com, localhost",
     LOGIN_IP_LIMITER: limiter(1000),
     LOGIN_GLOBAL_LIMITER: limiter(1000),
+    REGISTER_LIMITER: limiter(1000),
     ...overrides,
   } as Env;
 }

@@ -16,4 +16,5 @@ export interface Env {
   ALLOWED_REDIRECT_HOSTS: string; // Comma-separated hostnames
   LOGIN_IP_LIMITER: RateLimit;
   LOGIN_GLOBAL_LIMITER: RateLimit;
+  REGISTER_LIMITER: RateLimit;
 }

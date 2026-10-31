@@ -4,7 +4,11 @@ const API_PATH = /^\/api\/([^/]+)(\/.*)?$/;
 const RESOURCE_METADATA_PREFIX = "/.well-known/oauth-protected-resource";
 
 export function parseBackends(env: Env): Record<string, BackendConfig> {
-  return JSON.parse(env.BACKENDS);
+  const backends = JSON.parse(env.BACKENDS);
+  if (typeof backends !== "object" || backends === null) {
+    throw new TypeError("BACKENDS must be a JSON object");
+  }
+  return backends;
 }
 
 export function backendPathAfterName(pathname: string): string {

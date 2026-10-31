@@ -13,10 +13,11 @@
 
   // Hosts allowed to receive authorization codes. Add a client's host here to let it connect.
   "vars": {
-    "ALLOWED_REDIRECT_HOSTS": "claude.ai,claude.com,localhost,127.0.0.1"
+    "ALLOWED_REDIRECT_HOSTS": "claude.ai,claude.com,localhost,127.0.0.1,[::1]"
   },
 
-  // Password attempts per minute, per address and across all addresses.
+  // Password attempts per minute, per address and across all addresses, then
+  // client registrations per minute per address.
   // Counters are per Cloudflare location, so the limits are approximate.
   "ratelimits": [
     {
@@ -28,6 +29,11 @@
       "name": "LOGIN_GLOBAL_LIMITER",
       "namespace_id": "1002",
       "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "REGISTER_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 5, "period": 60 }
     }
   ]
 

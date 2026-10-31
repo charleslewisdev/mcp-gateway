@@ -26,14 +26,16 @@ export function createProxyHandler(
 ): OAuthResourceHandler<Env, GrantProps> {
   return {
     async fetch(request, env, ctx) {
+      const url = new URL(request.url);
+
       if (ctx.props.credentialId !== (await credentialId(env))) {
         return new Response("Credentials have changed", {
           status: 401,
-          headers: { "WWW-Authenticate": 'Bearer error="invalid_token"' },
+          headers: {
+            "WWW-Authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource/api/${backendName}", error="invalid_token"`,
+          },
         });
       }
-
-      const url = new URL(request.url);
 
       // Build the target URL.
       // backend.url is the full base (e.g. "https://bramble.example.com")
@@ -54,6 +56,8 @@ export function createProxyHandler(
         method: request.method,
         headers,
         body: request.body,
+        // A followed redirect would carry the backend's key to wherever it points
+        redirect: "manual",
         // @ts-expect-error — duplex needed for streaming request bodies in Workers
         duplex: "half",
       });

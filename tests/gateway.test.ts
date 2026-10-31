@@ -209,6 +209,36 @@ describe("authorization flow", () => {
     expect(submit.headers.get("Location")).toBeNull();
   });
 
+  it("limits registrations from one address", async () => {
+    const env = testEnv({ REGISTER_LIMITER: limiter(1) });
+    const registration = {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "203.0.113.9",
+      },
+      body: JSON.stringify({ redirect_uris: [REDIRECT_URI] }),
+    };
+
+    await call("/oauth/register", env, registration);
+    const blocked = await call("/oauth/register", env, registration);
+
+    expect(blocked.status).toBe(429);
+  });
+
+  it("shows a redirect port so it can't pass for the default", async () => {
+    const env = testEnv();
+    const redirectUri = "https://claude.ai:8443/callback";
+    const clientId = await register(env, redirectUri);
+
+    const page = await call(
+      `/authorize${authorizeQuery(clientId, { redirect_uri: redirectUri })}`,
+      env
+    );
+
+    expect(await page.text()).toContain("claude.ai:8443");
+  });
+
   it("refuses every redirect host when the allowlist is unset", async () => {
     const env = testEnv({ ALLOWED_REDIRECT_HOSTS: undefined as never });
     const clientId = await register(env);
@@ -218,9 +248,10 @@ describe("authorization flow", () => {
     expect(page.status).toBe(400);
   });
 
-  it("accepts a loopback redirect on any port when localhost is allowed", async () => {
-    const env = testEnv();
-    const redirectUri = "http://localhost:33418/callback";
+  it.each(["http://localhost:33418/cb", "http://[::1]:33418/cb"])(
+    "accepts the loopback redirect %s",
+    async (redirectUri) => {
+    const env = testEnv({ ALLOWED_REDIRECT_HOSTS: "localhost,[::1]" });
     const clientId = await register(env, redirectUri);
 
     const page = await call(
@@ -229,7 +260,8 @@ describe("authorization flow", () => {
     );
 
     expect(page.status).toBe(200);
-  });
+    }
+  );
 
   it.each([
     ["no challenge", { code_challenge: null, code_challenge_method: null }],
@@ -267,6 +299,30 @@ describe("authorization flow", () => {
 });
 
 describe("login", () => {
+  it.each([
+    ["a missing password", { username: USERNAME }],
+    ["a missing username", { password: PASSWORD }],
+    ["a file as the password", { username: USERNAME, password: new File(["x"], "p") }],
+  ])("rejects %s without running bcrypt", async (_name, fields) => {
+    const env = testEnv();
+    const clientId = await register(env);
+    const body = new FormData();
+    body.set("oauthParams", authorizeQuery(clientId));
+    for (const [key, value] of Object.entries(fields)) body.set(key, value);
+
+    const response = await call("/authorize", env, { method: "POST", body });
+
+    expect(response.status).toBe(401);
+    expect(compare).not.toHaveBeenCalled();
+  });
+
+  it("refuses a login with no authorization request", async () => {
+    const response = await login(testEnv(), "");
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("Location")).toBeNull();
+  });
+
   it("rejects a wrong password", async () => {
     const env = testEnv();
     const clientId = await register(env);
@@ -310,6 +366,25 @@ describe("login", () => {
     expect(compare).toHaveBeenCalledOnce();
   });
 
+  it("doesn't let one address use up the shared limit", async () => {
+    const env = testEnv({
+      LOGIN_IP_LIMITER: limiter(1),
+      LOGIN_GLOBAL_LIMITER: limiter(2),
+    });
+    const clientId = await register(env);
+    const query = authorizeQuery(clientId);
+    const attacker = { "CF-Connecting-IP": "203.0.113.66" };
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await login(env, query, { password: "wrong" }, attacker);
+    }
+    const owner = await login(env, query, {}, {
+      "CF-Connecting-IP": "198.51.100.1",
+    });
+
+    expect(owner.status).toBe(302);
+  });
+
   it("stops guessing spread across addresses", async () => {
     const env = testEnv({ LOGIN_GLOBAL_LIMITER: limiter(1) });
     const clientId = await register(env);
@@ -338,11 +413,15 @@ describe("proxy", () => {
     expect(inherited.status).toBe(404);
   });
 
-  it("answers 500 when BACKENDS is invalid", async () => {
-    const response = await call("/api/bramble/mcp", testEnv({ BACKENDS: "{" }));
+  it.each([["invalid JSON", "{"], ["null", "null"], ["no backends", "{}"]])(
+    "answers a clean 500 when BACKENDS is %s",
+    async (_name, BACKENDS) => {
+      const response = await call("/api/bramble/mcp", testEnv({ BACKENDS }));
 
-    expect(response.status).toBe(500);
-  });
+      expect(response.status).toBe(500);
+      expect(await response.text()).toContain("Server misconfiguration");
+    }
+  );
 
   it("keeps a token to the backend it was granted for", async () => {
     const env = testEnv();
@@ -356,6 +435,15 @@ describe("proxy", () => {
 
     expect(response.status).toBe(401);
     expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("hands redirects to the client instead of carrying the backend key along", async () => {
+    const env = testEnv();
+    const { access_token } = await connect(env);
+
+    await call("/api/bramble/mcp", env, bearer(access_token));
+
+    expect((backendFetch.mock.calls[0][0] as Request).redirect).toBe("manual");
   });
 
   it("forwards only the headers MCP needs", async () => {
@@ -439,6 +527,9 @@ describe("proxy", () => {
 
     expect(api.status).toBe(401);
     expect(api.headers.get("WWW-Authenticate")).toContain("invalid_token");
+    expect(api.headers.get("WWW-Authenticate")).toContain(
+      `resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/api/bramble"`
+    );
     expect(backendFetch).not.toHaveBeenCalled();
     expect(renewed.status).toBe(400);
   });

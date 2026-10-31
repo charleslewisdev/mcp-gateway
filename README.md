@@ -15,14 +15,14 @@ Claude.ai  ──OAuth 2.1──▶  mcp-gateway (Cloudflare Worker)  ──Bear
 - Full OAuth 2.1: Authorization Code + PKCE (S256 required), Dynamic Client Registration, token refresh
 - Simple password auth (bcrypt) with rate-limited login — no external IdP required
 - Multi-backend routing — one deployment proxies to multiple MCP servers, and each grant reaches one backend
-- Redirect host allowlist, so a self-registered client can't collect an authorization code
+- Redirect host allowlist: authorization codes only go to hosts you list
 - Streamable HTTP transport passthrough
 
 ## Quick Start
 
 ### Prerequisites
 
-- [Cloudflare account](https://dash.cloudflare.com/sign-up) (free)
+- [Cloudflare account](https://dash.cloudflare.com/sign-up) (see [Free tier](#free-tier))
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) (`npm i -g wrangler`)
 - A self-hosted MCP server with an API key
 
@@ -48,8 +48,9 @@ Copy the output `id` into `wrangler.jsonc`.
 # Your login credentials
 wrangler secret put USERNAME
 
-# Prompts for your password without echoing it, then stores its bcrypt hash
-npm run --silent hash-password | wrangler secret put PASSWORD_HASH
+# Prompts for your password without echoing it, then stores its bcrypt hash.
+# The && matters: wrangler would otherwise store an empty value if you cancel.
+HASH=$(npm run --silent hash-password) && printf %s "$HASH" | wrangler secret put PASSWORD_HASH
 
 # Backend configuration (JSON)
 wrangler secret put BACKENDS
@@ -106,11 +107,11 @@ Backends receive `Accept`, `Content-Type`, `Last-Event-ID`, `Mcp-Protocol-Versio
 | `USERNAME` | Login username |
 | `PASSWORD_HASH` | bcrypt hash of the login password |
 | `BACKENDS` | JSON object mapping backend names to `{url, token}` |
-| `ALLOWED_REDIRECT_HOSTS` | Comma-separated hosts allowed to receive authorization codes. Set in `wrangler.jsonc`; defaults to Claude and loopback. Unset refuses every client. |
+| `ALLOWED_REDIRECT_HOSTS` | Comma-separated hosts allowed to receive authorization codes, on any path or port. Set in `wrangler.jsonc`; defaults to Claude and loopback. Unset refuses every client. |
 
 ### Login rate limits
 
-`wrangler.jsonc` allows 5 password attempts a minute per address and 30 a minute overall, through Cloudflare's rate limiting bindings. Counters are per Cloudflare location, so treat the limits as approximate and use a strong password.
+`wrangler.jsonc` allows 5 password attempts a minute per address and 30 a minute overall, plus 5 client registrations a minute per address, through Cloudflare's rate limiting bindings. Counters are per Cloudflare location, so treat the limits as approximate and use a strong password. Enough addresses working together can use up the overall limit and hold up a new sign-in for a minute at a time; connected clients aren't affected.
 
 ### Revoking access
 
@@ -130,6 +131,10 @@ The Workers free tier allows 10ms of CPU per request. A bcrypt check at cost 10 
 | `/oauth/token` | Token exchange and refresh |
 | `/authorize` | Login page |
 | `/api/{backend}/...` | Authenticated proxy to backend |
+
+## Upgrading
+
+Tokens issued before per-backend resources were added stop working, so each client signs in once after you deploy. Run `wrangler deploy` from a config that includes the new `vars` and `ratelimits` blocks in `wrangler.jsonc`.
 
 ## How it works
 
